@@ -21,14 +21,47 @@ import (
 // / A utility to keep a list of JSON-LD files that we have found
 // in or on a page
 func addToJsonListIfValid(v1 *viper.Viper, jsonlds []string, new_json string) ([]string, error) {
+
 	valid, err := isValid(v1, new_json)
 	if err != nil {
+		isValidGraphArray, jsonlds, _ := isGraphArray(v1, new_json)
+		if isValidGraphArray {
+			return jsonlds, nil
+		}
 		return jsonlds, fmt.Errorf("error checking for valid json: %s", err)
 	}
 	if !valid {
+
 		return jsonlds, fmt.Errorf("invalid json; continuing")
 	}
 	return append(jsonlds, new_json), nil
+}
+
+func isGraphArray(v1 *viper.Viper, jsonld string) (bool, []string, error) {
+	var errs error
+	jsonlds := []string{}
+	var myArray []interface{}
+	err := json.Unmarshal([]byte(jsonld), &myArray)
+	if err == nil {
+		var myArray []map[string]interface{}
+		err := json.Unmarshal([]byte(jsonld), &myArray)
+		if err == nil {
+			for _, j := range myArray {
+				jsonld, _ := json.Marshal(j) // we just unmarshaled it.
+				valid, err := isValid(v1, string(jsonld))
+				if valid && err == nil {
+					jsonlds = append(jsonlds, string(jsonld))
+				} else {
+					errs = err
+				}
+			}
+			if len(jsonlds) > 0 {
+				return true, jsonlds, errs
+			}
+
+		}
+	}
+	return false, jsonlds, errs
 }
 
 // / Validate JSON-LD that we get
@@ -36,10 +69,11 @@ func isValid(v1 *viper.Viper, jsonld string) (bool, error) {
 	proc, options := common.JLDProc(v1)
 
 	var myInterface map[string]interface{}
-
 	err := json.Unmarshal([]byte(jsonld), &myInterface)
 	if err != nil {
-		return false, fmt.Errorf("Error in unmarshaling json: %s", err)
+		if err != nil {
+			return false, fmt.Errorf("Error in unmarshaling json: %s", err)
+		}
 	}
 
 	_, err = proc.ToRDF(myInterface, options) // returns triples but toss them, just validating
@@ -148,15 +182,42 @@ func fixContextArray(jsonld string, option config.ContextOption) (string, error)
 // for details
 func fixId(jsonld string) (string, error) {
 	var err error
-	jsonIdentifier := gjson.Get(jsonld, "@id").String()
 	originalBase := gjson.Get(jsonld, "@context.@base").String()
-	idUrl, err := url.Parse(jsonIdentifier)
-	if originalBase == "" && idUrl.Scheme == "" { // we have a relative url and no base in the context
-		log.Trace("Transforming id: ", jsonIdentifier, " to file:// url because it is relative")
-		jsonld, err = sjson.Set(jsonld, "@id", "file://" + jsonIdentifier)
-	} else {
-		log.Trace("JSON-LD context base or IRI id found: ", originalBase, "ID: ", idUrl)
+
+	if originalBase != "" { // if we have a context base, there is no need to do any of this
+		return jsonld, err
 	}
+	topLevelType := gjson.Get(jsonld, "@type").String()
+	var selector string
+	var formatter func(index int) string
+	if topLevelType == "Dataset" {
+		selector = "@id"
+		formatter = func(index int) string { return "@id" }
+	} else if topLevelType == "ItemList" {
+		selector = "itemListElement.#.item.@id"
+		formatter = func(index int) string { return fmt.Sprintf("itemListElement.%v.item.@id", index) }
+	} else { // we don't know how to fix any of these other things
+		log.Trace("Found a top-level type of ", topLevelType, " in this jsonld document")
+		return jsonld, err
+	}
+	jsonIdentifiers := gjson.Get(jsonld, selector)
+	index := 0
+	jsonIdentifiers.ForEach(func(key, jsonResult gjson.Result) bool {
+		jsonIdentifier := jsonResult.String()
+		idUrl, idErr := url.Parse(jsonIdentifier)
+		if idUrl.Scheme == "" { // we have a relative url and no base in the context
+			log.Trace("Transforming id: ", jsonIdentifier, " to file:// url because it is relative")
+			jsonld, idErr = sjson.Set(jsonld, formatter(index), "file://"+jsonIdentifier)
+		} else {
+			log.Trace("JSON-LD context base or IRI id found: ", originalBase, "ID: ", idUrl)
+		}
+		if idErr != nil {
+			err = idErr
+			return false
+		}
+		index++
+		return true
+	})
 	return jsonld, err
 }
 
@@ -380,7 +441,7 @@ func Upload(v1 *viper.Viper, mc *minio.Client, bucketName string, site string, u
 	// ProcessJson the file with FPutObject
 	_, err = mc.PutObject(context.Background(), bucketName, objectName, b, int64(b.Len()), minio.PutObjectOptions{ContentType: contentType, UserMetadata: usermeta})
 	if err != nil {
-		log.Fatal(objectName, err) // Fatal?   seriously?    I guess this is the object write, so the run is likely a bust at this point, but this seems a bit much still.
+		log.Errorf("%s: %s", objectName, err) // Fatal?   seriously?    I guess this is the object write, so the run is likely a bust at this point, but this seems a bit much still.
 	}
 	log.Debug("Uploaded Bucket:", bucketName, " File:", objectName, "Size", int64(b.Len()))
 	return sha, err

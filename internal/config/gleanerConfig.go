@@ -6,10 +6,12 @@ import (
 	"github.com/spf13/viper"
 )
 
+// auth fails if a region is set in minioclient...
 var gleanerTemplate = map[string]interface{}{
 	"minio": map[string]string{
 		"address":   "localhost",
 		"port":      "9000",
+		"region":    "",
 		"accesskey": "",
 		"secretkey": "",
 	},
@@ -48,8 +50,8 @@ func ReadGleanerConfig(filename string, cfgDir string) (*viper.Viper, error) {
 	v.AutomaticEnv()
 	err := v.ReadInConfig()
 	if err != nil {
-		fmt.Println("cannot find config file. Did you 'glcon generate --cfgName XXX' ")
-		log.Fatal("cannot find config file. Did you 'glcon generate --cfgName XXX' ")
+		fmt.Printf("cannot find config file. '%v' If glcon Did you 'glcon generate --cfgName XXX' \n", filename)
+		log.Fatalf("cannot find config file. '%v' Did you 'glcon generate --cfgName XXX' ", filename)
 		//panic(err)
 	}
 	return v, err

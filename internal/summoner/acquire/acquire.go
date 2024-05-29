@@ -1,7 +1,6 @@
 package acquire
 
 import (
-	"fmt"
 	"github.com/gleanerio/gleaner/internal/common"
 	"net/http"
 	"net/url"
@@ -17,14 +16,13 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/schollz/progressbar/v3"
 	"github.com/spf13/viper"
-	bolt "go.etcd.io/bbolt"
 )
 
 const EarthCubeAgent = "EarthCube_DataBot/1.0"
 const JSONContentType = "application/ld+json"
 
 // ResRetrieve is a function to pull down the data graphs at resources
-func ResRetrieve(v1 *viper.Viper, mc *minio.Client, m map[string][]string, db *bolt.DB, runStats *common.RunStats) {
+func ResRetrieve(v1 *viper.Viper, mc *minio.Client, m map[string][]string, runStats *common.RunStats) {
 	wg := sync.WaitGroup{}
 
 	// Why do I pass the wg pointer?   Just make a new one
@@ -47,23 +45,23 @@ func ResRetrieve(v1 *viper.Viper, mc *minio.Client, m map[string][]string, db *b
 		}
 		wg.Add(1)
 		//go getDomain(v1, mc, urls, domain, &wg, db)
-		go getDomain(v1, mc, urls, domain, &wg, db, repologger, r)
+		go getDomain(v1, mc, urls, domain, &wg, repologger, r)
 	}
 
 	wg.Wait()
 }
 
-func getConfig(v1 *viper.Viper, sourceName string) (string, int, int64, error) {
+func getConfig(v1 *viper.Viper, sourceName string) (string, int, int64, int, string, string, error) {
 	bucketName, err := configTypes.GetBucketName(v1)
 	if err != nil {
-		return bucketName, 0, 0, err
+		return bucketName, 0, 0, 0, configTypes.AccceptContentType, "", err
 	}
 
 	var mcfg configTypes.Summoner
 	mcfg, err = configTypes.ReadSummmonerConfig(v1.Sub("summoner"))
 
 	if err != nil {
-		return bucketName, 0, 0, err
+		return bucketName, 0, 0, 0, configTypes.AccceptContentType, "", err
 	}
 	// Set default thread counts and global delay
 	tc := mcfg.Threads
@@ -76,9 +74,11 @@ func getConfig(v1 *viper.Viper, sourceName string) (string, int, int64, error) {
 	// look for a domain specific override crawl delay
 	sources, err := configTypes.GetSources(v1)
 	source, err := configTypes.GetSourceByName(sources, sourceName)
-
+	acceptContent := source.AcceptContentType
+	jsonProfile := source.JsonProfile
+	hw := source.HeadlessWait
 	if err != nil {
-		return bucketName, tc, delay, err
+		return bucketName, tc, delay, hw, acceptContent, jsonProfile, err
 	}
 
 	if source.Delay != 0 && source.Delay > delay {
@@ -86,25 +86,15 @@ func getConfig(v1 *viper.Viper, sourceName string) (string, int, int64, error) {
 		tc = 1
 		log.Info("Crawl delay set to ", delay, " for ", sourceName)
 	}
-
 	log.Info("Thread count ", tc, " delay ", delay)
-	return bucketName, tc, delay, nil
+
+	return bucketName, tc, delay, hw, acceptContent, jsonProfile, nil
 }
 
 func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName string,
-	wg *sync.WaitGroup, db *bolt.DB, repologger *log.Logger, repoStats *common.RepoStats) {
-	//func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName string, wg *sync.WaitGroup, db *bolt.DB) {
+	wg *sync.WaitGroup, repologger *log.Logger, repoStats *common.RepoStats) {
 
-	// make the bucket (if it doesn't exist)
-	db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucket([]byte(sourceName))
-		if err != nil {
-			return fmt.Errorf("create bucket: %s", err)
-		}
-		return nil
-	})
-
-	bucketName, tc, delay, err := getConfig(v1, sourceName)
+	bucketName, tc, delay, headlessWait, acceptContent, jsonProfile, err := getConfig(v1, sourceName)
 	if err != nil {
 		// trying to read a source, so let's not kill everything with a panic/fatal
 		log.Error("Error reading config file ", err)
@@ -146,7 +136,7 @@ func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName stri
 				log.Error(i, err, urlloc)
 			}
 			req.Header.Set("User-Agent", EarthCubeAgent)
-			req.Header.Set("Accept", "application/ld+json, text/html")
+			req.Header.Set("Accept", acceptContent)
 
 			resp, err := client.Do(req)
 			if err != nil {
@@ -158,8 +148,31 @@ func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName stri
 			}
 			defer resp.Body.Close()
 
-			jsonlds, err := FindJSONInResponse(v1, urlloc, repologger, resp)
-
+			jsonlds, err := FindJSONInResponse(v1, urlloc, jsonProfile, repologger, resp)
+			// there was an issue with sitemaps... but now this code
+			//if contains(contentTypeHeader, JSONContentType) || contains(contentTypeHeader, "application/json") {
+			//
+			//	b, err := io.ReadAll(resp.Body)
+			//	// b, err := ioutil.ReadAll(resp.Body)  Go.1.15 and earlier
+			//	if err != nil {
+			//		log.Error("#", i, " error on ", urlloc, err) // print an message containing the index (won't keep order)
+			//		repoStats.Inc(common.Issues)
+			//		lwg.Done() // tell the wait group that we be done
+			//		<-semaphoreChan
+			//		return
+			//	}
+			//	jsonlds = []string{string(b)}
+			//} else {
+			//	var err error
+			//	jsonlds, err = FindJSONInResponse(v1, urlloc, jsonProfile, repologger, resp)
+			//	if err != nil {
+			//		log.Error("#", i, " error on ", urlloc, err) // print an message containing the index (won't keep order)
+			//		repoStats.Inc(common.Issues)
+			//		lwg.Done() // tell the wait group that we be done
+			//		<-semaphoreChan
+			//		return
+			//	}
+			//}
 			if err != nil {
 				log.Error("#", i, " error on ", urlloc, err) // print an message containing the index (won't keep order)
 				repoStats.Inc(common.Issues)
@@ -176,21 +189,14 @@ func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName stri
 			// even is no JSON-LD packages found, record the event of checking this URL
 			if len(jsonlds) < 1 {
 				// TODO is her where I then try headless, and scope the following for into an else?
-				log.WithFields(log.Fields{"url": urlloc, "contentType": "Direct access failed, trying headless']"}).Info("Direct access failed, trying headless for ", urlloc)
-				repologger.WithFields(log.Fields{"url": urlloc, "contentType": "Direct access failed, trying headless']"}).Error() // this needs to go into the issues file
-				err := PageRenderAndUpload(v1, mc, 60*time.Second, urlloc, sourceName, db, repologger, repoStats)                  // TODO make delay configurable
-
-				if err != nil {
-					log.WithFields(log.Fields{"url": urlloc, "issue": "converting json ld"}).Error("PageRenderAndUpload ", urlloc, "::", err)
-					repologger.WithFields(log.Fields{"url": urlloc, "issue": "converting json ld"}).Error(err)
-				}
-				db.Update(func(tx *bolt.Tx) error {
-					b := tx.Bucket([]byte(sourceName))
-					err := b.Put([]byte(urlloc), []byte(fmt.Sprintf("NILL: %s", urlloc))) // no JOSN-LD found at this URL
-					return err
-				})
-				if err != nil {
-					log.Error("DB Update", urlloc, "::", err)
+				if headlessWait >= 0 {
+					log.WithFields(log.Fields{"url": urlloc, "contentType": "Direct access failed, trying headless']"}).Info("Direct access failed, trying headless for ", urlloc)
+					repologger.WithFields(log.Fields{"url": urlloc, "contentType": "Direct access failed, trying headless']"}).Error() // this needs to go into the issues file
+					err := PageRenderAndUpload(v1, mc, 60*time.Second, urlloc, sourceName, repologger, repoStats)                      // TODO make delay configurable
+					if err != nil {
+						log.WithFields(log.Fields{"url": urlloc, "issue": "converting json ld"}).Error("PageRenderAndUpload ", urlloc, "::", err)
+						repologger.WithFields(log.Fields{"url": urlloc, "issue": "converting json ld"}).Error(err)
+					}
 				}
 
 			} else {
@@ -199,7 +205,7 @@ func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName stri
 				repoStats.Inc(common.Summoned)
 			}
 
-			UploadWrapper(v1, mc, bucketName, sourceName, urlloc, db, repologger, repoStats, jsonlds)
+			UploadWrapper(v1, mc, bucketName, sourceName, urlloc, repologger, repoStats, jsonlds)
 
 			bar.Add(1)                                          // bar.Incr()
 			log.Trace("#", i, "thread for", urlloc)             // print an message containing the index (won't keep order)
@@ -211,9 +217,10 @@ func getDomain(v1 *viper.Viper, mc *minio.Client, urls []string, sourceName stri
 		}(i, sourceName)
 
 	}
+	common.RunRepoStatsOutput(repoStats, sourceName)
 }
 
-func FindJSONInResponse(v1 *viper.Viper, urlloc string, repologger *log.Logger, response *http.Response) ([]string, error) {
+func FindJSONInResponse(v1 *viper.Viper, urlloc string, jsonProfile string, repologger *log.Logger, response *http.Response) ([]string, error) {
 	doc, err := goquery.NewDocumentFromResponse(response)
 	if err != nil {
 		return nil, err
@@ -225,19 +232,23 @@ func FindJSONInResponse(v1 *viper.Viper, urlloc string, repologger *log.Logger, 
 	// if the URL is sending back JSON-LD correctly as application/ld+json
 	// this should not be here IMHO, but need to support people not setting proper header value
 	// The URL is sending back JSON-LD but incorrectly sending as application/json
+	// would like to add contains(contentTypeHeader, jsonProfile)
+	// but empty profile strings matching all
 	if contains(contentTypeHeader, JSONContentType) || contains(contentTypeHeader, "application/json") || fileExtensionIsJson(urlloc) {
 		logFields := log.Fields{"url": urlloc, "contentType": "json or ld_json"}
 		repologger.WithFields(logFields).Debug()
 		log.WithFields(logFields).Debug(urlloc, " as ", contentTypeHeader)
-
-		jsonlds, err = addToJsonListIfValid(v1, jsonlds, doc.Text())
+		resp_text := doc.Text()
+		jsonlds, err = addToJsonListIfValid(v1, jsonlds, resp_text)
 		if err != nil {
 			log.WithFields(logFields).Error("Error processing json response from ", urlloc, err)
 			repologger.WithFields(logFields).Error(err)
 		}
-		// look in the HTML response for <script type=application/ld+json>
+		// look in the HTML response for <script type=application/ld+json> ^
 	} else {
-		doc.Find("script[type='application/ld+json']").Each(func(i int, s *goquery.Selection) {
+		//doc.Find("script[type='application/ld+json']").Each(func(i int, s *goquery.Selection) {
+		//Please note that Cascadia's selectors do not necessarily match all supported selectors of jQuery (Sizzle).  https://github.com/andybalholm/cascadia
+		doc.Find("script[type^='application/ld+json']").Each(func(i int, s *goquery.Selection) {
 			jsonlds, err = addToJsonListIfValid(v1, jsonlds, s.Text())
 			logFields := log.Fields{"url": urlloc, "contentType": "script[type='application/ld+json']"}
 			repologger.WithFields(logFields).Info()
@@ -251,7 +262,7 @@ func FindJSONInResponse(v1 *viper.Viper, urlloc string, repologger *log.Logger, 
 	return jsonlds, nil
 }
 
-func UploadWrapper(v1 *viper.Viper, mc *minio.Client, bucketName string, sourceName string, urlloc string, db *bolt.DB, repologger *log.Logger, repoStats *common.RepoStats, jsonlds []string) {
+func UploadWrapper(v1 *viper.Viper, mc *minio.Client, bucketName string, sourceName string, urlloc string, repologger *log.Logger, repoStats *common.RepoStats, jsonlds []string) {
 	for i, jsonld := range jsonlds {
 		if jsonld != "" { // traps out the root domain...   should do this different
 			logFields := log.Fields{"url": urlloc, "issue": "Uploading"}
@@ -269,28 +280,12 @@ func UploadWrapper(v1 *viper.Viper, mc *minio.Client, bucketName string, sourceN
 				log.WithFields(logFields).Info("Successfully put ", sha, " in summoned bucket for ", urlloc)
 				repoStats.Inc(common.Stored)
 			}
-			// TODO  Is here where to add an entry to the KV store
-			db.Update(func(tx *bolt.Tx) error {
-				b := tx.Bucket([]byte(sourceName))
-				err := b.Put([]byte(urlloc), []byte(sha))
-				if err != nil {
-					log.Error("Error writing to bolt ", err)
-				}
-				return nil
-			})
+
 		} else {
 			logFields := log.Fields{"url": urlloc, "issue": "Empty JSON-LD document found "}
 			log.WithFields(logFields).Info("Empty JSON-LD document found. Continuing.")
 			repologger.WithFields(logFields).Error("Empty JSON-LD document found. Continuing.")
-			// TODO  Is here where to add an entry to the KV store
-			db.Update(func(tx *bolt.Tx) error {
-				b := tx.Bucket([]byte(sourceName))
-				err := b.Put([]byte(urlloc), []byte(fmt.Sprintf("NULL: %s", urlloc))) // no JSON-LD found at this URL
-				if err != nil {
-					log.Error("Error writing to bolt ", err)
-				}
-				return nil
-			})
+
 		}
 	}
 }
