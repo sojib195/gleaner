@@ -1,13 +1,7 @@
 name: Test Gleaner against pids.geoconnex.dev Sitemap
 
 on:
-  push:
-    branches:
-      - master
-  pull_request:
-    branches:
-      - master
-  workflow_dispatch:
+  [  workflow_dispatch, pull_request ]
 jobs:
   main:
     runs-on: ubuntu-22.04
@@ -51,4 +45,25 @@ jobs:
             sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/refgages0 330 
             sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/refmainstems 66
             echo "::endgroup::"
- 
+      - name: Run Gleaner Harvest Again
+        run: |
+            echo "::group:: Run Gleaner Harvest Again"
+            sh scripts/iow/start-gleaner.sh
+            echo "::endgroup::"  
+      - name: Verify Harvest Counts on Second Harvest (Verify Idempotency)
+        run: |
+            echo "::group::Verify Harvest Counts on Second Harvest (Verify Idempotency)"
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/orgs 5
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/prov/cdss0 30 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/prov/dams0 45
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/prov/nmwdist0 266 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/prov/refgages0 330 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/prov/refmainstems 66 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/cdss0 30
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/dams0 45 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/nmwdist0 265
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/refgages0 330 
+            sh scripts/iow/assert-s3-dir-cnt.sh $HOME/bin/mc myminio/iow/summoned/refmainstems 66
+            echo "::endgroup::"
+
+
